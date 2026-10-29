@@ -43,7 +43,7 @@
 ## 安装与启用
 
 使用 DSH 插件管理器安装 QQ、记忆和情绪三个 0.4.0 本地包。没有发布到 npm，请指定本地来源，不要仅填包名。
-也可用本地目录：`link:C:/Users/jellyStone/Documents/Codex/2026-10-26/kan/outputs/dsh-nia-qq`。
+也可用本地目录：`link:C:/projects/dsh-role-plugins/packages/dsh-nia-qq`。
 本地链接依赖该目录一直存在；迁移时建议使用固定版本 tgz 包。
 
 1. 停止旧 QQ Bridge 对同一个账号的收发，避免重复处理。新插件不会自动关闭或卸载旧插件。
