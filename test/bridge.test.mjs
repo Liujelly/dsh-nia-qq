@@ -35,6 +35,37 @@ test('quiet window follows the last message with a bounded maximum wait', async 
   assert.equal(f.prompts.length,1);assert.match(f.prompts[0].content[0].text,/"messageId":"1".*"messageId":"2"/s);
 });
 
+test('voice guidance is supplied for real normal and command QQ turns, including groups without @', async t=>{
+  const f=fixture(t);await f.bridge.connect();f.cfg.ttsEnabled=true;
+  const send=async(id,type,segments)=>{
+    f.bridge.event({...message(id,type),message:segments});
+    const c=f.store.data.chats[`100:${type}:${type==='group'?'300':'200'}`];
+    await f.bridge.deliver(c,f.bridge.pendingMessages(c));
+    return f.prompts.at(-1).content[0].text;
+  };
+  const txt=text=>({type:'text',data:{text}}), at=qq=>({type:'at',data:{qq}});
+  assert.match(await send(71,'private',[txt('/语音 你好')]),/本轮语音能力/);
+  assert.match(await send(72,'private',[txt('你好')]),/本轮语音能力/);
+  assert.match(await send(73,'group',[txt('你好')]),/本轮语音能力/);
+  assert.match(await send(74,'group',[at('100'),txt('/语音 你好')]),/本轮语音能力/);
+  f.cfg.ttsEnabled=false;
+  assert.doesNotMatch(await send(75,'private',[txt('/语音 你好')]),/本轮语音能力/);
+});
+
+test('voice authorization expires on cancelled turn and cannot carry into manual DSH input',async t=>{
+  const f=fixture(t);await f.bridge.connect();f.cfg.ttsEnabled=true;
+  f.bridge.event(message(80));const c=f.store.data.chats['100:private:200'];const session={id:c.sessionId};
+  f.sessions.ensure=async()=>({whenIdle:async()=>{},followup:async()=>{
+    assert.equal(f.bridge.turns.get(c.key).voiceRequestId,'80');
+    f.bridge.sessionEvent(session,{type:'turn/end',data:{reason:{kind:'cancelled'},turn:1}});
+    assert.equal(f.bridge.turns.get(c.key).voiceRequestId,undefined);
+  }});
+  await f.bridge.deliver(c,f.bridge.pendingMessages(c));
+  f.bridge.sessionEvent(session,{type:'user/message',data:{message:{id:'manual',source:{kind:'user'}}}});
+  assert.equal(f.bridge.turns.get(c.key).qq,false);
+  assert.throws(()=>f.bridge.tts.synthesize(c,'hello','manual'));
+});
+
 test('new input while preparing an answer defers stale sends and stays queued exactly once', async t=>{
   const f=fixture(t);await f.bridge.connect();f.cfg.dryRun=false;
   const c=f.store.data.chats['100:private:200'];f.bridge.event(message(1));
@@ -168,7 +199,7 @@ function fakeDSH() {
   async function open(opts, resume) {
     calls.push([resume ? 'resume' : 'create', opts]); const id = opts.sessionId || opts.resumeSessionId;
     const agent = { id, options: {...opts.agentOptions}, session: { id, header: { cwd: opts.meta?.cwd || 'previous' }, requestHeader: () => saved.get(id)?.header, snapshotEvents: () => saved.get(id)?.events || [], append: (_type, data) => { saved.set(id, { ...saved.get(id), preset: data.agentPreset }); } },
-      ctx: { tools: { register: t => { registrations.push(t); return () => {}; } }, systemPrompt: { section: s => { registrations.push(s); return () => {}; } } }, whenIdle: async () => {}, followup: async () => {} };
+      ctx: { on: () => () => {}, tools: { register: t => { registrations.push(t); return () => {}; } }, systemPrompt: { section: s => { registrations.push(s); return () => {}; } } }, whenIdle: async () => {}, followup: async () => {} };
     await opts.setup(agent.ctx, agent); saved.set(id, saved.get(id) || {}); live.set(id, agent);
     return { agent, dispose: async () => { live.delete(id); } };
   }
@@ -208,6 +239,33 @@ test('session resume restores prompt model variables before publish and preserve
   assert.deepEqual(host.calls.find(x => x[0] === 'resume')[1].agentOptions, {provider:'p',model:'changed'});
   assert.deepEqual(host.live.get(c.sessionId).options, {provider:'p',model:'m',reasoningEffort:'low'});
   await next.close();
+});
+
+test('existing live and resumed sessions register TTS only when enabled', async t => {
+  for (const mode of ['live', 'resume']) for (const enabled of [true, false]) {
+    const f = fixture(t), host = fakeDSH();
+    Object.assign(f.cfg, { provider: 'p', model: 'm', workspace: f.dir, ttsEnabled: enabled });
+    const c = f.store.chat(100, 'private', 200); c.created = true;
+    if (mode === 'live') {
+      await host.ctx.agents.create({ sessionId: c.sessionId, meta: { cwd: f.dir }, agentOptions: { provider: 'p', model: 'm' }, setup: async () => {} });
+    } else {
+      host.saved.set(c.sessionId, { header: { config: { provider: 'p', model: 'm' } } });
+    }
+    const calls = [], result = { status: 'mocked' };
+    f.bridge.tts = { synthesize: (...args) => { calls.push(args); return result; } };
+    const s = new Sessions(host.ctx, f.store, () => f.cfg); t.after(() => s.close());
+    const agent = await s.ensure(c, f.bridge);
+    assert.equal(host.calls.filter(x => x[0] === 'resume').length, mode === 'resume' ? 1 : 0);
+    assert.equal(agent, host.live.get(c.sessionId));
+    const tools = host.registrations.filter(x => x.name === 'nia_qq_tts');
+    assert.equal(tools.length, enabled ? 1 : 0, `${mode}, ttsEnabled=${enabled}`);
+    assert.ok(host.registrations.some(x => x.name === 'nia_qq_say'));
+    if (enabled) {
+      assert.deepEqual(tools[0].parameters.required, ['text', 'requestId']);
+      assert.equal(await tools[0].execute({ text: 'test', requestId: 'request-1' }), result);
+      assert.deepEqual(calls, [[c, 'test', 'request-1']]);
+    }
+  }
 });
 
 test('resume honors a pending selection, falls back for never-started sessions, and rejects missing models', () => {
